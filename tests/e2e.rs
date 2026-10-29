@@ -133,3 +133,78 @@ fn rejects_zero_dimension_overrides_for_ranges_and_positions() {
         }
     }
 }
+
+fn last_frame_lit(bytes: &[u8]) -> (usize, usize, Vec<bool>) {
+    let mut options = gif::DecodeOptions::new();
+    options.set_color_output(gif::ColorOutput::RGBA);
+    let mut decoder = options.read_info(bytes).expect("output is not a valid GIF");
+    let (width, height) = (decoder.width() as usize, decoder.height() as usize);
+    let mut canvas = vec![0u8; width * height * 4];
+
+    while let Some(frame) = decoder.read_next_frame().expect("failed to decode frame") {
+        for y in 0..frame.height as usize {
+            for x in 0..frame.width as usize {
+                let src = (y * frame.width as usize + x) * 4;
+                if frame.buffer[src + 3] == 0 {
+                    continue;
+                }
+                let dst = ((y + frame.top as usize) * width + x + frame.left as usize) * 4;
+                canvas[dst..dst + 4].copy_from_slice(&frame.buffer[src..src + 4]);
+            }
+        }
+    }
+
+    let lit = canvas
+        .chunks(4)
+        .map(|px| (px[0] as u16 + px[1] as u16 + px[2] as u16) / 3 > 110)
+        .collect();
+
+    (width, height, lit)
+}
+
+// Box-drawing glyphs are drawn on the cell grid, so wherever a run crosses
+// from one cell into the next the stroke covers exactly the same pixels on
+// both sides: a corner, tee or cross drawn from the font instead steps or
+// changes width at the cell edge.
+#[test]
+fn rounded_corners_tees_and_double_lines_meet_their_lines() {
+    let bytes = render("tests/fixtures/box-joins.cast", config()).unwrap();
+    let (width, height, lit) = last_frame_lit(&bytes);
+    let at = |x: usize, y: usize| lit[y * width + x];
+    let cell_w = width as f64 / 10.0;
+    let cell_h = height as f64 / 6.0;
+    let left = |c: usize| ((c as f64 + 1.0) * cell_w) as usize;
+    let top = |r: usize| ((r as f64 + 0.5) * cell_h) as usize;
+
+    for c in [0, 2, 4, 5, 7] {
+        let rows = if c >= 5 { 0..2 } else { 0..4 };
+        for r in rows {
+            let y = top(r + 1);
+            let above: Vec<usize> = (left(c)..left(c + 1)).filter(|&x| at(x, y - 1)).collect();
+            let below: Vec<usize> = (left(c)..left(c + 1)).filter(|&x| at(x, y)).collect();
+            assert!(!above.is_empty(), "no stroke in column {c} at row {r}");
+            assert_eq!(
+                above,
+                below,
+                "column {c} steps between rows {r} and {}",
+                r + 1
+            );
+        }
+    }
+
+    for r in [0, 2, 4] {
+        let columns = if r == 4 { 0..4 } else { 0..7 };
+        for c in columns.filter(|&c| c != 4) {
+            let x = left(c + 1);
+            let before: Vec<usize> = (top(r)..top(r + 1)).filter(|&y| at(x - 1, y)).collect();
+            let after: Vec<usize> = (top(r)..top(r + 1)).filter(|&y| at(x, y)).collect();
+            assert!(!before.is_empty(), "no stroke in row {r} at column {c}");
+            assert_eq!(
+                before,
+                after,
+                "row {r} steps between columns {c} and {}",
+                c + 1
+            );
+        }
+    }
+}

@@ -489,6 +489,162 @@ impl SwashRenderer {
         }
     }
 
+    fn paint_double_lines(
+        &self,
+        buf: &mut [RGBA8],
+        layout: CellLayout,
+        fg: RGBA8,
+        faint: bool,
+        [up, right, down, left]: [bool; 4],
+    ) {
+        let cell_w = layout.x_r.saturating_sub(layout.x_l);
+        let cell_h = layout.y_b.saturating_sub(layout.y_t);
+        let t = self.box_thickness();
+        let center_x = layout.x_l + cell_w.saturating_sub(t) / 2;
+        let center_y = layout.y_t + cell_h.saturating_sub(t) / 2;
+
+        // Two strokes one stroke-width either side of the light centre line, so
+        // double lines stay on the same grid as light and heavy ones.
+        let near_x = (center_x.saturating_sub(t), center_x);
+        let far_x = (center_x + t, center_x + 2 * t);
+        let near_y = (center_y.saturating_sub(t), center_y);
+        let far_y = (center_y + t, center_y + 2 * t);
+        let rect = |buf: &mut [RGBA8], r| self.paint_cell_rect(buf, r, fg, faint);
+
+        let horizontal = right || left;
+        let vertical = up || down;
+
+        if horizontal && !vertical {
+            for (y_t, y_b) in [near_y, far_y] {
+                rect(buf, (layout.x_l, y_t, layout.x_r, y_b));
+            }
+            return;
+        }
+
+        if vertical && !horizontal {
+            for (x_l, x_r) in [near_x, far_x] {
+                rect(buf, (x_l, layout.y_t, x_r, layout.y_b));
+            }
+            return;
+        }
+
+        // A corner: the stroke on the outside of the turn runs to the far edge of
+        // the other outside stroke; the inside one stops at the inside stroke.
+        let (outer_y, inner_y) = if down {
+            (near_y, far_y)
+        } else {
+            (far_y, near_y)
+        };
+        let (outer_x, inner_x) = if right {
+            (near_x, far_x)
+        } else {
+            (far_x, near_x)
+        };
+
+        for ((h_t, h_b), (v_l, v_r)) in [(outer_y, outer_x), (inner_y, inner_x)] {
+            let (h_l, h_r) = if right {
+                (v_l, layout.x_r)
+            } else {
+                (layout.x_l, v_r)
+            };
+            let (v_t, v_b) = if down {
+                (h_t, layout.y_b)
+            } else {
+                (layout.y_t, h_b)
+            };
+
+            rect(buf, (h_l, h_t, h_r, h_b));
+            rect(buf, (v_l, v_t, v_r, v_b));
+        }
+    }
+
+    fn paint_box_arc(
+        &self,
+        buf: &mut [RGBA8],
+        layout: CellLayout,
+        fg: RGBA8,
+        faint: bool,
+        (sx, sy): (f64, f64),
+    ) {
+        let cell_w = layout.x_r.saturating_sub(layout.x_l);
+        let cell_h = layout.y_b.saturating_sub(layout.y_t);
+
+        if cell_w == 0 || cell_h == 0 {
+            return;
+        }
+
+        let t = self.box_thickness().min(cell_w).min(cell_h);
+        let half = t as f64 / 2.0;
+
+        // The same centre lines as the light straight strokes, so the arc's ends
+        // meet ─ and │ in the neighbouring cells exactly.
+        let xc = (layout.x_l + (cell_w - t) / 2) as f64 + half;
+        let yc = (layout.y_t + (cell_h - t) / 2) as f64 + half;
+        let to_x = if sx > 0.0 {
+            layout.x_r as f64 - xc
+        } else {
+            xc - layout.x_l as f64
+        };
+        let to_y = if sy > 0.0 {
+            layout.y_b as f64 - yc
+        } else {
+            yc - layout.y_t as f64
+        };
+        let r = to_x.min(to_y);
+        let (ax, ay) = (xc + sx * r, yc + sy * r);
+
+        let covers = |px: f64, py: f64| {
+            let past_x = (px - ax) * sx >= 0.0;
+            let past_y = (py - ay) * sy >= 0.0;
+
+            if past_y && !past_x {
+                return (px - xc).abs() <= half;
+            }
+
+            if past_x && !past_y {
+                return (py - yc).abs() <= half;
+            }
+
+            if past_x || past_y {
+                return false;
+            }
+
+            ((px - ax).hypot(py - ay) - r).abs() <= half
+        };
+
+        let x_l = layout.x_l.min(self.pixel_width);
+        let x_r = layout.x_r.min(self.pixel_width);
+        let y_t = layout.y_t.min(self.pixel_height);
+        let y_b = layout.y_b.min(self.pixel_height);
+        let samples = POWERLINE_SAMPLES * POWERLINE_SAMPLES;
+        let max_alpha = if faint { 127 } else { 255 };
+
+        for y in y_t..y_b {
+            for x in x_l..x_r {
+                let mut coverage = 0;
+
+                for sy_i in 0..POWERLINE_SAMPLES {
+                    for sx_i in 0..POWERLINE_SAMPLES {
+                        let px = x as f64 + (sx_i as f64 + 0.5) / POWERLINE_SAMPLES as f64;
+                        let py = y as f64 + (sy_i as f64 + 0.5) / POWERLINE_SAMPLES as f64;
+
+                        if covers(px, py) {
+                            coverage += 1;
+                        }
+                    }
+                }
+
+                if coverage == 0 {
+                    continue;
+                }
+
+                let ratio = ((coverage * max_alpha + samples / 2) / samples) as u8;
+                let idx = y * self.pixel_width + x;
+                buf[idx] = blend_straight_alpha(fg, buf[idx], ratio);
+            }
+        }
+    }
+
     fn paint_powerline_symbol(
         &self,
         buf: &mut [RGBA8],
@@ -811,6 +967,42 @@ impl SwashRenderer {
             0x2533 => box_lines!(None, Some(Heavy), Some(Heavy), Some(Heavy)),
             0x2534 => box_lines!(Some(Light), Some(Light), None, Some(Light)),
             0x2547 => box_lines!(Some(Heavy), Some(Heavy), Some(Light), Some(Heavy)),
+
+            // box drawings light/heavy tees and crosses
+            0x251C => box_lines!(Some(Light), Some(Light), Some(Light), None),
+            0x2523 => box_lines!(Some(Heavy), Some(Heavy), Some(Heavy), None),
+            0x2524 => box_lines!(Some(Light), None, Some(Light), Some(Light)),
+            0x252B => box_lines!(Some(Heavy), None, Some(Heavy), Some(Heavy)),
+            0x252C => box_lines!(None, Some(Light), Some(Light), Some(Light)),
+            0x253B => box_lines!(Some(Heavy), Some(Heavy), None, Some(Heavy)),
+            0x253C => box_lines!(Some(Light), Some(Light), Some(Light), Some(Light)),
+            0x254B => box_lines!(Some(Heavy), Some(Heavy), Some(Heavy), Some(Heavy)),
+
+            // box drawings double lines and corners
+            0x2550 => {
+                self.paint_double_lines(buf, layout, fg, attrs.faint, [false, true, false, true])
+            }
+            0x2551 => {
+                self.paint_double_lines(buf, layout, fg, attrs.faint, [true, false, true, false])
+            }
+            0x2554 => {
+                self.paint_double_lines(buf, layout, fg, attrs.faint, [false, true, true, false])
+            }
+            0x2557 => {
+                self.paint_double_lines(buf, layout, fg, attrs.faint, [false, false, true, true])
+            }
+            0x255A => {
+                self.paint_double_lines(buf, layout, fg, attrs.faint, [true, true, false, false])
+            }
+            0x255D => {
+                self.paint_double_lines(buf, layout, fg, attrs.faint, [true, false, false, true])
+            }
+
+            // box drawings light arcs ╭╮╯╰
+            0x256D => self.paint_box_arc(buf, layout, fg, attrs.faint, (1.0, 1.0)),
+            0x256E => self.paint_box_arc(buf, layout, fg, attrs.faint, (-1.0, 1.0)),
+            0x256F => self.paint_box_arc(buf, layout, fg, attrs.faint, (-1.0, -1.0)),
+            0x2570 => self.paint_box_arc(buf, layout, fg, attrs.faint, (1.0, -1.0)),
 
             // box drawings light/heavy half-lines
             0x2574 => box_lines!(None, None, None, Some(Light)),
