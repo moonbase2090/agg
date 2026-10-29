@@ -1,6 +1,6 @@
 [package]
 name = "agg"
-version = "1.9.0+box-joins.1"
+version = "1.9.0+lunatui.1"
 authors = ["Marcin Kulik <m@ku1ik.com>"]
 edition = "2024"
 homepage = "https://docs.asciinema.org/manual/agg/"

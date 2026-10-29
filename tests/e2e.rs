@@ -208,3 +208,30 @@ fn rounded_corners_tees_and_double_lines_meet_their_lines() {
         }
     }
 }
+
+#[test]
+fn octants_fill_exactly_their_eighths_of_the_cell() {
+    let bytes = render("tests/fixtures/octants.cast", config()).unwrap();
+    let (width, height, lit) = last_frame_lit(&bytes);
+    let cell_w = width as f64 / 16.0;
+    let cell_h = height as f64 / 2.0;
+    let masks = [0x01_u8, 0x96, 0x69, 0x3C, 0x81, 0x7E, 0xC3];
+
+    for (index, mask) in masks.into_iter().enumerate() {
+        let x0 = (1.0 + 2.0 * index as f64) * cell_w;
+        let y0 = 0.5 * cell_h;
+
+        for bit in 0..8 {
+            let (col, row) = ((bit % 2) as f64, (bit / 2) as f64);
+            let x = (x0 + (col + 0.5) * cell_w / 2.0) as usize;
+            let y = (y0 + (row + 0.5) * cell_h / 4.0) as usize;
+            let want = mask & (1 << bit) != 0;
+
+            assert_eq!(
+                lit[y * width + x],
+                want,
+                "octant {bit} of mask {mask:#010b}"
+            );
+        }
+    }
+}
