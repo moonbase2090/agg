@@ -235,3 +235,56 @@ fn octants_fill_exactly_their_eighths_of_the_cell() {
         }
     }
 }
+
+fn last_frame_rgb(bytes: &[u8]) -> (usize, Vec<u8>) {
+    let mut options = gif::DecodeOptions::new();
+    options.set_color_output(gif::ColorOutput::RGBA);
+    let mut decoder = options.read_info(bytes).expect("output is not a valid GIF");
+    let width = decoder.width() as usize;
+    let mut canvas = vec![0u8; width * decoder.height() as usize * 4];
+
+    while let Some(frame) = decoder.read_next_frame().expect("failed to decode frame") {
+        for y in 0..frame.height as usize {
+            for x in 0..frame.width as usize {
+                let src = (y * frame.width as usize + x) * 4;
+                if frame.buffer[src + 3] != 0 {
+                    let dst = ((y + frame.top as usize) * width + x + frame.left as usize) * 4;
+                    canvas[dst..dst + 4].copy_from_slice(&frame.buffer[src..src + 4]);
+                }
+            }
+        }
+    }
+
+    (width, canvas)
+}
+
+// A faint line is drawn at half alpha. Where a glyph's arms overlap (the
+// centre of every ─, every junction) a second blend would leave a brighter
+// dot, so every pixel along the stroke must have the same colour.
+#[test]
+fn faint_box_lines_are_evenly_lit_through_joins() {
+    let bytes = render("tests/fixtures/faint-lines.cast", config()).unwrap();
+    let (width, rgba) = last_frame_rgb(&bytes);
+    let height = rgba.len() / 4 / width;
+    let level = |x: usize, y: usize| {
+        let at = (y * width + x) * 4;
+        rgba[at] as u16 + rgba[at + 1] as u16 + rgba[at + 2] as u16
+    };
+    let background = level(0, 0);
+    let cell_w = width as f64 / 10.0;
+    let (from, to) = ((cell_w * 1.5) as usize, (cell_w * 7.5) as usize);
+    let stroke = (0..height)
+        .max_by_key(|&y| {
+            (from..to)
+                .filter(|&x| level(x, y) > background + 30)
+                .count()
+        })
+        .unwrap();
+    let levels: std::collections::BTreeSet<u16> = (from..to).map(|x| level(x, stroke)).collect();
+
+    assert_eq!(
+        levels.len(),
+        1,
+        "faint stroke row {stroke} has levels {levels:?}"
+    );
+}

@@ -464,28 +464,59 @@ impl SwashRenderer {
             .map(|(_, y_b)| y_b)
             .max();
 
-        if let Some((v_l, v_r)) = up_x {
-            let up_bottom = horizontal_b.unwrap_or(center_y_b);
+        let rects = [
+            up_x.map(|(v_l, v_r)| (v_l, layout.y_t, v_r, horizontal_b.unwrap_or(center_y_b))),
+            right_y.map(|(h_t, h_b)| (vertical_l.unwrap_or(center_x_l), h_t, layout.x_r, h_b)),
+            down_x.map(|(v_l, v_r)| (v_l, horizontal_t.unwrap_or(center_y_t), v_r, layout.y_b)),
+            left_y.map(|(h_t, h_b)| (layout.x_l, h_t, vertical_r.unwrap_or(center_x_r), h_b)),
+        ];
 
-            self.paint_cell_rect(buf, (v_l, layout.y_t, v_r, up_bottom), fg, faint);
-        }
+        self.paint_rects_once(buf, &rects, fg, faint);
+    }
 
-        if let Some((h_t, h_b)) = right_y {
-            let right_left = vertical_l.unwrap_or(center_x_l);
+    // The arms of a box glyph overlap where they meet. Painting each covered
+    // pixel once keeps faint (half-alpha) lines even instead of doubling up
+    // into a brighter dot at every junction and cell centre.
+    fn paint_rects_once(
+        &self,
+        buf: &mut [RGBA8],
+        rects: &[Option<(usize, usize, usize, usize)>],
+        fg: RGBA8,
+        faint: bool,
+    ) {
+        let x_l = rects.iter().flatten().map(|r| r.0).min();
+        let y_t = rects.iter().flatten().map(|r| r.1).min();
+        let (Some(x_l), Some(y_t)) = (x_l, y_t) else {
+            return;
+        };
+        let x_r = rects
+            .iter()
+            .flatten()
+            .map(|r| r.2)
+            .max()
+            .unwrap_or(x_l)
+            .min(self.pixel_width);
+        let y_b = rects
+            .iter()
+            .flatten()
+            .map(|r| r.3)
+            .max()
+            .unwrap_or(y_t)
+            .min(self.pixel_height);
+        let ratio = if faint { 127 } else { 255 };
 
-            self.paint_cell_rect(buf, (right_left, h_t, layout.x_r, h_b), fg, faint);
-        }
+        for y in y_t..y_b {
+            for x in x_l..x_r {
+                let covered = rects
+                    .iter()
+                    .flatten()
+                    .any(|&(l, t, r, b)| (l..r).contains(&x) && (t..b).contains(&y));
 
-        if let Some((v_l, v_r)) = down_x {
-            let down_top = horizontal_t.unwrap_or(center_y_t);
-
-            self.paint_cell_rect(buf, (v_l, down_top, v_r, layout.y_b), fg, faint);
-        }
-
-        if let Some((h_t, h_b)) = left_y {
-            let left_right = vertical_r.unwrap_or(center_x_r);
-
-            self.paint_cell_rect(buf, (layout.x_l, h_t, left_right, h_b), fg, faint);
+                if covered {
+                    let idx = y * self.pixel_width + x;
+                    buf[idx] = blend_straight_alpha(fg, buf[idx], ratio);
+                }
+            }
         }
     }
 
@@ -509,22 +540,18 @@ impl SwashRenderer {
         let far_x = (center_x + t, center_x + 2 * t);
         let near_y = (center_y.saturating_sub(t), center_y);
         let far_y = (center_y + t, center_y + 2 * t);
-        let rect = |buf: &mut [RGBA8], r| self.paint_cell_rect(buf, r, fg, faint);
-
         let horizontal = right || left;
         let vertical = up || down;
 
         if horizontal && !vertical {
-            for (y_t, y_b) in [near_y, far_y] {
-                rect(buf, (layout.x_l, y_t, layout.x_r, y_b));
-            }
+            let rects = [near_y, far_y].map(|(y_t, y_b)| Some((layout.x_l, y_t, layout.x_r, y_b)));
+            self.paint_rects_once(buf, &rects, fg, faint);
             return;
         }
 
         if vertical && !horizontal {
-            for (x_l, x_r) in [near_x, far_x] {
-                rect(buf, (x_l, layout.y_t, x_r, layout.y_b));
-            }
+            let rects = [near_x, far_x].map(|(x_l, x_r)| Some((x_l, layout.y_t, x_r, layout.y_b)));
+            self.paint_rects_once(buf, &rects, fg, faint);
             return;
         }
 
@@ -541,7 +568,12 @@ impl SwashRenderer {
             (far_x, near_x)
         };
 
-        for ((h_t, h_b), (v_l, v_r)) in [(outer_y, outer_x), (inner_y, inner_x)] {
+        let mut rects = [None; 4];
+
+        for (at, ((h_t, h_b), (v_l, v_r))) in [(outer_y, outer_x), (inner_y, inner_x)]
+            .into_iter()
+            .enumerate()
+        {
             let (h_l, h_r) = if right {
                 (v_l, layout.x_r)
             } else {
@@ -553,9 +585,11 @@ impl SwashRenderer {
                 (layout.y_t, h_b)
             };
 
-            rect(buf, (h_l, h_t, h_r, h_b));
-            rect(buf, (v_l, v_t, v_r, v_b));
+            rects[at * 2] = Some((h_l, h_t, h_r, h_b));
+            rects[at * 2 + 1] = Some((v_l, v_t, v_r, v_b));
         }
+
+        self.paint_rects_once(buf, &rects, fg, faint);
     }
 
     fn paint_box_arc(
